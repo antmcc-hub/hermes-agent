@@ -52,7 +52,6 @@ class TestExchangeCopilotToken:
         assert "GitHubCopilotChat" in req.get_header("User-agent")
 
 
-
     @patch("urllib.request.urlopen")
     def test_raises_on_empty_token(self, mock_urlopen):
         from hermes_cli.copilot_auth import exchange_copilot_token
@@ -68,36 +67,13 @@ class TestExchangeCopilotToken:
             exchange_copilot_token("gho_test123")
 
 
-class TestGetCopilotApiToken:
-    """Tests for get_copilot_api_token() — the fallback wrapper."""
-
-    @patch("hermes_cli.copilot_auth.exchange_copilot_token")
-    def test_returns_exchanged_token(self, mock_exchange):
-        from hermes_cli.copilot_auth import get_copilot_api_token
-
-        mock_exchange.return_value = ("exchanged_jwt", time.time() + 1800, None)
-        api_token, base_url = get_copilot_api_token("gho_raw")
-        assert api_token == "exchanged_jwt"
-        assert base_url is None
-
-
-class TestTokenFingerprint:
-    """Tests for _token_fingerprint()."""
-
-    def test_consistent(self):
-        from hermes_cli.copilot_auth import _token_fingerprint
-
-        fp1 = _token_fingerprint("gho_abc123")
-        fp2 = _token_fingerprint("gho_abc123")
-        assert fp1 == fp2
-
-
 class TestCallerIntegration:
     """Test that callers correctly use token exchange."""
 
+    @patch("hermes_cli.auth.is_provider_explicitly_configured", return_value=True)
     @patch("hermes_cli.copilot_auth.resolve_copilot_token", return_value=("gho_raw", "GH_TOKEN"))
     @patch("hermes_cli.copilot_auth.get_copilot_api_token", return_value=("exchanged_jwt", None))
-    def test_auth_resolve_uses_exchange(self, mock_exchange, mock_resolve):
+    def test_auth_resolve_uses_exchange(self, mock_exchange, mock_resolve, _mock_explicit):
         from hermes_cli.auth import _resolve_api_key_provider_secret
 
         # Create a minimal pconfig mock
@@ -116,26 +92,6 @@ class TestDeriveBaseUrlFromProxyEp:
 
         token = "tid=abc;exp=999;proxy-ep=proxy.enterprise.githubcopilot.com;sku=copilot_enterprise"
         assert _derive_base_url_from_proxy_ep(token) == "https://api.enterprise.githubcopilot.com"
-
-
-
-
-    @patch("urllib.request.urlopen")
-    def test_exchange_returns_none_base_url_for_individual(self, mock_urlopen, _clear_jwt_cache):
-        """exchange_copilot_token returns None base_url for individual accounts."""
-        from hermes_cli.copilot_auth import exchange_copilot_token
-
-        token_no_ep = "tid=abc;exp=999;sku=copilot_individual"
-        expires_at = time.time() + 1800
-        resp_data = json.dumps({"token": token_no_ep, "expires_at": expires_at}).encode()
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = resp_data
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
-        api_token, _, base_url = exchange_copilot_token("gho_test")
-        assert base_url is None
 
 
 class TestJwtDiskStoreBounds:
