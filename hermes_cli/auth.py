@@ -380,6 +380,13 @@ def _model_level_key_env(provider_id: str) -> str:
 def _resolve_api_key_provider_secret(provider_id: str, pconfig: ProviderConfig) -> tuple[str, str]:
     """Resolve an API-key provider's token and indicate where it came from."""
     if provider_id == "copilot":
+        # GH_TOKEN / GITHUB_TOKEN are commonly set for git, gh or CI, not as a Copilot opt-in. Probing
+        # them unasked turns a classic ghp_* PAT into a validation warning on every status check.
+        try:
+            if not is_provider_explicitly_configured("copilot"):
+                return "", ""
+        except Exception:
+            pass  # config inspection unavailable: keep the resolver's previous behaviour
         # The dedicated copilot auth module does proper token validation/exchange.
         try:
             from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token
@@ -1262,13 +1269,20 @@ def _config_selects_provider(normalized: str) -> bool:
 def _explicit_pool_entry_present(normalized: str) -> bool:
     """Pool rows from EXPLICIT Hermes flows (manual add / device-code / PKCE) or live env keys;
     ambient borrowed sources (gh_cli / claude_code / qwen-cli) are deliberately excluded."""
-    return any(_pool_entry_is_explicit(entry) for entry in read_credential_pool(normalized))
+    return any(_pool_entry_is_explicit(entry, normalized) for entry in read_credential_pool(normalized))
 
 
 # Set by Claude Code itself, not by the user explicitly configuring anthropic in Hermes.
 _IMPLICIT_ENV_VARS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+# Generic GitHub credentials configured for gh / git, not a choice to enable Copilot inference.
+_PROVIDER_IMPLICIT_ENV_VARS: Dict[str, FrozenSet[str]] = {"copilot": frozenset({"GH_TOKEN", "GITHUB_TOKEN"})}
 _EXPLICIT_POOL_SOURCES = frozenset({"device_code", "loopback_pkce", "hermes_pkce", "manual"})
 _VERTEX_PROVIDER_IDS = ("vertex", "google-vertex", "vertex-ai", "gcp-vertex", "vertexai")
+
+
+def _implicit_env_vars(normalized: str) -> FrozenSet[str]:
+    """Env vars that never count as an explicit opt-in to *normalized*."""
+    return _IMPLICIT_ENV_VARS | _PROVIDER_IMPLICIT_ENV_VARS.get(normalized, frozenset())
 
 
 def _env_secret(name: str) -> bool:
@@ -1300,14 +1314,15 @@ def _explicit_env_credentials_present(normalized: str) -> bool:
         if not pconfig:
             return False
     if pconfig.auth_type == "api_key":
-        return any(_env_secret(v) for v in pconfig.api_key_env_vars if v not in _IMPLICIT_ENV_VARS)
+        implicit = _implicit_env_vars(normalized)
+        return any(_env_secret(v) for v in pconfig.api_key_env_vars if v not in implicit)
     if pconfig.auth_type == "aws_sdk":
         return _env_secret("AWS_BEARER_TOKEN_BEDROCK") or (
             _env_secret("AWS_ACCESS_KEY_ID") and _env_secret("AWS_SECRET_ACCESS_KEY"))
     return False
 
 
-def _pool_entry_is_explicit(entry: Any) -> bool:
+def _pool_entry_is_explicit(entry: Any, normalized: str = "") -> bool:
     """True for pool rows the user created via an explicit Hermes flow (or a still-live env key)."""
     if not isinstance(entry, dict):
         return False
@@ -1317,6 +1332,8 @@ def _pool_entry_is_explicit(entry: Any) -> bool:
         # count it when the referenced var still resolves to a usable secret NOW.
         # See #55790.
         env_var = entry.get("source", "").split(":", 1)[1].strip()
+        if env_var in _implicit_env_vars(normalized):
+            return False
         return bool(env_var and _env_secret(env_var))
     return bool(source) and (source in _EXPLICIT_POOL_SOURCES or source.startswith("manual:"))
 

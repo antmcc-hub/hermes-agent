@@ -70,9 +70,10 @@ class TestExchangeCopilotToken:
 class TestCallerIntegration:
     """Test that callers correctly use token exchange."""
 
+    @patch("hermes_cli.auth.is_provider_explicitly_configured", return_value=True)
     @patch("hermes_cli.copilot_auth.resolve_copilot_token", return_value=("gho_raw", "GH_TOKEN"))
     @patch("hermes_cli.copilot_auth.get_copilot_api_token", return_value=("exchanged_jwt", None))
-    def test_auth_resolve_uses_exchange(self, mock_exchange, mock_resolve):
+    def test_auth_resolve_uses_exchange(self, mock_exchange, mock_resolve, _mock_explicit):
         from hermes_cli.auth import _resolve_api_key_provider_secret
 
         # Create a minimal pconfig mock

@@ -18,9 +18,12 @@ def _write_auth_store(tmp_path, payload: dict) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clean_anthropic_env(monkeypatch):
-    """Strip Anthropic env vars so CI secrets don't leak into tests."""
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+def _clean_provider_env(monkeypatch):
+    """Strip ambient provider credentials so CI secrets don't leak into tests."""
+    for key in (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+        "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -327,3 +330,105 @@ def test_aws_env_does_not_leak_into_other_providers(tmp_path, monkeypatch, _clea
 
     from hermes_cli.auth import is_provider_explicitly_configured
     assert is_provider_explicitly_configured("anthropic") is False
+
+
+# ── Copilot: generic GitHub tokens are not an opt-in ────────────────────────────────────────────
+
+
+def _hermes_home(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+@pytest.mark.parametrize("env_var", ["GH_TOKEN", "GITHUB_TOKEN"])
+def test_generic_github_token_is_not_explicit_copilot_opt_in(tmp_path, monkeypatch, env_var):
+    _hermes_home(tmp_path, monkeypatch)
+    monkeypatch.setenv(env_var, "ghp_classic_pat_for_git_only")
+
+    from hermes_cli.auth import is_provider_explicitly_configured
+    assert is_provider_explicitly_configured("copilot") is False
+
+
+@pytest.mark.parametrize("env_var", ["GH_TOKEN", "GITHUB_TOKEN"])
+def test_generic_github_pool_source_is_not_explicit_copilot_opt_in(tmp_path, monkeypatch, env_var):
+    _hermes_home(tmp_path, monkeypatch)
+    monkeypatch.setenv(env_var, "ghp_classic_pat_for_git_only")
+    _write_auth_store(tmp_path, {
+        "version": 1,
+        "providers": {},
+        "active_provider": None,
+        "credential_pool": {"copilot": [{"source": f"env:{env_var}"}]},
+    })
+
+    from hermes_cli.auth import is_provider_explicitly_configured
+    assert is_provider_explicitly_configured("copilot") is False
+
+
+def test_copilot_specific_env_var_is_explicit_opt_in(tmp_path, monkeypatch):
+    _hermes_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_explicit_copilot_token")
+
+    from hermes_cli.auth import is_provider_explicitly_configured
+    assert is_provider_explicitly_configured("copilot") is True
+
+
+def test_copilot_implicit_env_vars_are_scoped():
+    """The GitHub-token exclusion applies to Copilot only, not to every provider."""
+    from hermes_cli import auth
+    assert auth._implicit_env_vars("copilot") >= {"GH_TOKEN", "GITHUB_TOKEN"}
+    assert "GH_TOKEN" not in auth._implicit_env_vars("anthropic")
+
+
+@pytest.mark.parametrize("env_var", ["GH_TOKEN", "GITHUB_TOKEN"])
+def test_copilot_secret_does_not_probe_generic_github_token(tmp_path, monkeypatch, env_var):
+    _hermes_home(tmp_path, monkeypatch)
+    monkeypatch.setenv(env_var, "ghp_classic_pat_for_git_only")
+    monkeypatch.setattr(
+        "hermes_cli.copilot_auth.resolve_copilot_token",
+        lambda: pytest.fail("generic GitHub token must not trigger Copilot probing"),
+    )
+
+    from hermes_cli import auth
+    assert auth._resolve_api_key_provider_secret("copilot", auth.PROVIDER_REGISTRY["copilot"]) == ("", "")
+    assert auth.get_api_key_provider_status("copilot").get("configured") is False
+
+
+def _record_copilot_probe(monkeypatch):
+    calls = []
+
+    def _resolve():
+        calls.append("resolve")
+        return "gho_explicit_copilot_token", "COPILOT_GITHUB_TOKEN"
+
+    monkeypatch.setattr("hermes_cli.copilot_auth.resolve_copilot_token", _resolve)
+    monkeypatch.setattr(
+        "hermes_cli.copilot_auth.get_copilot_api_token",
+        lambda token: ("exchanged_api_token", None),
+    )
+    return calls
+
+
+def test_copilot_secret_probes_when_copilot_env_var_set(tmp_path, monkeypatch):
+    _hermes_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_explicit_copilot_token")
+    calls = _record_copilot_probe(monkeypatch)
+
+    from hermes_cli import auth
+    api_key, source = auth._resolve_api_key_provider_secret("copilot", auth.PROVIDER_REGISTRY["copilot"])
+    assert (api_key, source) == ("exchanged_api_token", "COPILOT_GITHUB_TOKEN")
+    assert calls == ["resolve"]
+
+
+def test_copilot_secret_probes_when_config_selects_copilot(tmp_path, monkeypatch):
+    """Explicit config.yaml selection still opts in, even when the only token is GH_TOKEN."""
+    _hermes_home(tmp_path, monkeypatch)
+    _write_config(tmp_path, {"model": {"provider": "copilot", "default": "gpt-5-mini"}})
+    monkeypatch.setenv("GH_TOKEN", "gho_token_used_for_copilot")
+    calls = _record_copilot_probe(monkeypatch)
+
+    from hermes_cli import auth
+    api_key, _source = auth._resolve_api_key_provider_secret("copilot", auth.PROVIDER_REGISTRY["copilot"])
+    assert api_key == "exchanged_api_token"
+    assert calls == ["resolve"]
