@@ -1829,6 +1829,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if isinstance(envelope, dict) and envelope.get("ok") is True and "result" in envelope:
             if self._record_polling_progress(generation):
                 self._record_updates_received(envelope.get("result"))
+                try:
+                    from plugins.platforms.telegram.ringer_release import observe_native_callbacks
+                    observe_native_callbacks(self, envelope.get("result"), generation)
+                except Exception:
+                    # Optional release proof must fail closed without disturbing polling or logging updates.
+                    pass
 
     def _record_updates_received(self, result) -> None:
         """Count updates Telegram handed us on the getUpdates wire (#102260). Only reached for the
@@ -4331,6 +4337,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # Shorter than the base wording on purpose: two buttons share a row on mobile.
         return {choice: t(f"platform.telegram.approval.action_{choice}") for choice in ("once", "session", "always", "deny")}
 
+    async def send_ringer_manifest_release(self, packet: Dict[str, Any]) -> SendResult:
+        """Downstream coordinator ingress only; not a model tool or generic /approve."""
+        from plugins.platforms.telegram.ringer_release import send_release
+        return await send_release(self, packet)
+
     async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
         """Inline-keyboard approval prompt; buttons call ``resolve_gateway_approval()`` like the
         text ``/approve`` flow."""
@@ -4790,6 +4801,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         self._accept_update()
         data = query.data
+        if data.startswith("rm:"):
+            from plugins.platforms.telegram.ringer_release import handle_release
+            await handle_release(self, update)
+            return
         cb = self._callback_ctx(query)
         # Model picker / generic choice picker (/reasoning, /fast) need a chat id.
         for prefixes, handler in (
